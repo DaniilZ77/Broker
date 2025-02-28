@@ -1,0 +1,6 @@
+env: local
+broker_port: localhost:3000
+queue_length: 200
+queue_names: ["queue1", "queue2", "queue3", "queue4", "queue5"]
+max_subscribers: 100
+callback_timeout: 1s
