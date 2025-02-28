@@ -23,6 +23,7 @@ func main() {
 
 	cfg := config.ReadConfig()
 	logOpts := httplog.Options{
+		LogLevel:         slog.LevelDebug,
 		MessageFieldName: "message",
 		Tags: map[string]string{
 			"env": cfg.Env,
