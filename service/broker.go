@@ -109,6 +109,13 @@ func (b *Broker) send(ctx context.Context, queue *queue, message []byte) {
 }
 
 func (b *Broker) distribute(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			b.log.Error("recovered from panic", slog.Any("panic", r))
+		}
+		go b.distribute(ctx)
+	}()
+
 	for {
 		for _, q := range b.queues {
 			select {
