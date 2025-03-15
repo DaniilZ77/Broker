@@ -7,19 +7,18 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"runtime"
 	"sync"
 	"time"
 )
 
 type queue struct {
+	messages chan []byte
+
 	mu          *sync.RWMutex
-	messages    chan []byte
 	subscribers []string
 }
 
 type Broker struct {
-	sema   chan struct{}
 	queues map[string]*queue
 	cfg    *BrokerConfig
 	log    *slog.Logger
@@ -36,8 +35,7 @@ func NewBroker(ctx context.Context, cfg *BrokerConfig, log *slog.Logger) *Broker
 	var res Broker
 	res.log = log
 	res.cfg = cfg
-	res.queues = make(map[string]*queue)
-	res.sema = make(chan struct{}, runtime.GOMAXPROCS(-1))
+	res.queues = make(map[string]*queue, len(cfg.QueueNames))
 
 	for _, name := range cfg.QueueNames {
 		res.queues[name] = &queue{
@@ -86,25 +84,27 @@ func (b *Broker) Subscribe(ctx context.Context, queueName string, callback strin
 	return nil
 }
 
+func (b *Broker) withCancel(cancel context.CancelFunc, f func()) {
+	defer cancel()
+	f()
+}
+
 func (b *Broker) send(ctx context.Context, queue *queue, message []byte) {
-	b.sema <- struct{}{}
-	defer func() { <-b.sema }()
 	queue.mu.RLock()
 	defer queue.mu.RUnlock()
 	for _, subscriber := range queue.subscribers {
 		ctx, cancel := context.WithTimeout(ctx, b.cfg.CallbackTimeout)
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, subscriber, bytes.NewReader(message))
-		if err != nil {
-			cancel()
-			b.log.Error("failed to create request", slog.Any("error", err))
-			continue
-		}
+		b.withCancel(cancel, func() {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, subscriber, bytes.NewReader(message))
+			if err != nil {
+				b.log.Error("failed to create request", slog.Any("error", err))
+				return
+			}
 
-		if _, err = http.DefaultClient.Do(req); err != nil {
-			b.log.Error("failed to send message", slog.Any("error", err))
-		}
-
-		cancel()
+			if _, err = http.DefaultClient.Do(req); err != nil {
+				b.log.Error("failed to send message", slog.Any("error", err))
+			}
+		})
 	}
 }
 
@@ -117,11 +117,12 @@ func (b *Broker) distribute(ctx context.Context) {
 	}()
 
 	for {
-		for _, q := range b.queues {
+		for name, q := range b.queues {
 			select {
 			case m, ok := <-q.messages:
 				if !ok {
-					break
+					b.log.Error("queue closed", slog.String("name", name))
+					continue
 				}
 
 				go b.send(ctx, q, m)
